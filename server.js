@@ -1,9 +1,12 @@
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+const FormData = require('form-data'); // Используем библиотеку, она умеет работать со стримами диска
 
 const app = express();
-const PORT = process.env.PORT  10000; 
+const PORT = process.env.PORT || 10000; 
 
 // НАСТРОЙКА CORS
 app.use(cors({
@@ -22,7 +25,21 @@ app.options('*', (req, res) => {
 
 app.use(express.json());
 
-const storage = multer.memoryStorage();
+// ИСПРАВЛЕНО: Сохраняем файлы на ДИСК во временную папку /tmp, чтобы не забивать оперативку
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const tmpDir = '/tmp/uploads';
+    if (!fs.existsSync(tmpDir)){
+        fs.mkdirSync(tmpDir, { recursive: true });
+    }
+    cb(null, tmpDir);
+  },
+  filename: (req, file, cb) => {
+    const safeName = `${Date.now()}-${file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")}`;
+    cb(null, safeName);
+  }
+});
+
 const upload = multer({ 
   storage: storage,
   limits: { fileSize: 150 * 1024 * 1024 } 
@@ -31,7 +48,7 @@ const upload = multer({
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
-// ГЛАВНЫЙ РОУТ ЗАГРУЗКИ
+// РОУТ ЗАГРУЗКИ ФАЙЛОВ
 app.post('/upload', upload.any(), async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
@@ -40,40 +57,46 @@ app.post('/upload', upload.any(), async (req, res) => {
   const file = req.files && req.files[0];
   if (!file) {
     console.error("❌ Файл не найден в запросе!");
-    return res.status(400).json({ error: 'Файл не найден в запросе фронтенда' });
+    return res.status(400).json({ error: 'Файл не найден' });
   }
 
-  console.log(`📂 Файл: "${file.originalname}" | Ключ: "${file.fieldname}" | Размер: ${(file.size / (1024 * 1024)).toFixed(2)} МБ`);
+  console.log(`📂 Файл: "${file.originalname}" | Размер: ${(file.size / (1024 * 1024)).toFixed(2)} МБ`);
+  console.log(`💾 Сохранен на диск: ${file.path}`);
 
-  if (!TG_BOT_TOKEN  !TG_CHAT_ID) {
+  if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
     console.error("❌ Ошибка: Переменные окружения не заданы!");
+    // Удаляем файл с диска, чтобы не копить мусор при ошибке
+    if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
     return res.status(500).json({ error: 'Бэкенд не настроен в Переменных Окружения.' });
   }
 
   try {
-    // Используем встроенный в Node.js FormData, чтобы не конфликтовать со старыми библиотеками
-    const nodeFormData = new globalThis.FormData();
-    nodeFormData.append('chat_id', TG_CHAT_ID);
-    
-    const safeName = ${Date.now()}-${file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")};
-    
-    // Переводим буфер в Blob для отправки через fetch
-    const fileBlob = new Blob([file.buffer], { type: 'application/octet-stream' });
-    nodeFormData.append('document', fileBlob, safeName);
+    console.log("🚀 Стрим-отправка файла в Telegram API...");
 
-    console.log("🚀 Отправка файла в Telegram API...");
+    // Создаем FormData из библиотеки form-data, так как она идеально стримит файлы с диска
+    const form = new FormData();
+    form.append('chat_id', TG_CHAT_ID);
+    
+    // ИСПРАВЛЕНО: Вместо буфера передаем СТРИМ файла. Оперативка = 0 МБ!
+    form.append('document', fs.createReadStream(file.path), {
+      filename: file.filename,
+      contentType: 'application/octet-stream'
+    });
 
-    // Чистый fetch без ручных headers — Node.js сам выставит нужные границы (boundary)
-    const response = await fetch(https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument, {
+    const response = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument`, {
       method: 'POST',
-      body: nodeFormData
+      headers: form.getHeaders(), // Передаем заголовки стрима
+      body: form
     });
 
     const resData = await response.json();
 
-    if (!response.ok  !resData.ok) {
+    // Удаляем временный файл с диска СРАЗУ после ответа Телеграма, чтобы освободить место
+    if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+
+    if (!response.ok || !resData.ok) {
       console.error("❌ Telegram отклонил запрос:", JSON.stringify(resData));
-      return res.status(500).json({ error: resData.description  'Telegram Reject' });
+      return res.status(500).json({ error: resData.description || 'Telegram Reject' });
     }
 
     console.log("🎉 Telegram успешно принял файл!");
@@ -89,37 +112,36 @@ app.post('/upload', upload.any(), async (req, res) => {
     }
 
     if (!fileId) {
-      throw new Error('Telegram не вернул file_id для загруженного типа контента');
+      throw new Error('Telegram не вернул file_id');
     }
 
-    const pathResponse = await fetch(https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${fileId});
+    const pathResponse = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${fileId}`);
     const pathData = await pathResponse.json();
     
     if (pathData.ok) {
       const filePath = pathData.result.file_path;
-      
-      // Генерируем безопасную прокси-ссылку
-      const downloadUrl = https://${req.get('host')}/file/${filePath};
-      console.log(🔗 Безопасная ссылка сгенерирована: ${downloadUrl}\n);
+      const downloadUrl = `https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath}`;
+      console.log(`🔗 Ссылка сгенерирована: ${downloadUrl}\n`);
       return res.json({ success: true, url: downloadUrl });
     }
 
     throw new Error('Не удалось получить путь файла от Telegram через getFile');
   } catch (error) {
     console.error('💥 Критический сбой внутри /upload:', error.message);
+    // На всякий случай подчищаем файл при падении
+    if (file && fs.existsSync(file.path)) fs.unlinkSync(file.path);
     return res.status(500).json({ error: error.message });
   }
 });
-// БЕЗОПАСНЫЙ ПРОКСИ-РОУТ ДЛЯ СКАЧИВАНИЯ ФАЙЛОВ
+
+// Безопасный прокси-роут
 app.get('/file/*', async (req, res) => {
   try {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const filePath = req.params[0]; 
-    
     if (!TG_BOT_TOKEN) return res.status(500).send("Токен бота отсутствует");
 
-    const response = await fetch(https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath});
-    
+    const response = await fetch(`https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath}`);
     if (!response.ok) return res.status(response.status).send("Файл не найден в Telegram");
 
     const contentType = response.headers.get('content-type');
@@ -134,9 +156,9 @@ app.get('/file/*', async (req, res) => {
 
 app.get('/', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.send('IvPlay Бэкенд на Render Работает Идеально!');
+  res.send('IvPlay Бэкенд работает стабильно на диске!');
 });
 
 app.listen(PORT, () => {
-  console.log(🚀 Сервер успешно запущен на порту ${PORT});
+  console.log(`🚀 Сервер успешно запущен на порту ${PORT}`);
 });
