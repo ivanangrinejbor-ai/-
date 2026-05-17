@@ -32,18 +32,21 @@ const upload = multer({
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
-// 1. ИСПРАВЛЕНО: Теперь Multer слушает поле 'file', как присылает фронтенд
-app.post('/upload', upload.single('file'), async (req, res) => {
+// ИСПРАВЛЕНО: .any() позволяет принимать файлы с ЛЮБЫМИ ключами ('file' или 'document')
+app.post('/upload', upload.any(), async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   console.log("\n=== [RENDER] ПОЛУЧЕН ЗАПРОС НА ЗАГРУЗКУ ===");
   
-  if (!req.file) {
+  // Берем первый попавшийся файл из запроса
+  const file = req.files && req.files[0];
+  
+  if (!file) {
     console.error("❌ Файл не найден в запросе!");
     return res.status(400).json({ error: 'Файл не найден в запросе фронтенда' });
   }
 
-  console.log(`📂 Файл: "${req.file.originalname}" | Размер: ${(req.file.size / (1024 * 1024)).toFixed(2)} МБ`);
+  console.log(`📂 Файл: "${file.originalname}" | Ключ: "${file.fieldname}" | Размер: ${(file.size / (1024 * 1024)).toFixed(2)} МБ`);
 
   if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
     console.error("❌ Ошибка: Переменные окружения не заданы!");
@@ -54,10 +57,10 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     const form = new FormData();
     form.append('chat_id', TG_CHAT_ID);
     
-    const safeName = `${Date.now()}-${req.file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")}`;
+    const safeName = `${Date.now()}-${file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")}`;
     
-    // Для Телеграма оставляем ключ 'document'
-    form.append('document', req.file.buffer, { 
+    // Всегда отправляем в Telegram как документ, чтобы не терять качество и расширения (.apk, .newtrobat)
+    form.append('document', file.buffer, { 
       filename: safeName,
       contentType: 'application/octet-stream' 
     });
@@ -80,31 +83,46 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
     console.log("🎉 Telegram успешно принял файл!");
 
-    const fileId = resData.result.document.file_id;
+    // ИСПРАВЛЕНО: Безопасное извлечение file_id, работающее для любых типов ответов ТГ
+    let fileId = null;
+    if (resData.result.document) {
+      fileId = resData.result.document.file_id;
+    } else if (resData.result.photo) {
+      // Если Telegram всё же распознал это как фото, берем самый крупный размер (последний в массиве)
+      const photos = resData.result.photo;
+      fileId = photos[photos.length - 1].file_id;
+    } else if (resData.result.audio) {
+      fileId = resData.result.audio.file_id;
+    }
+
+    if (!fileId) {
+      throw new Error('Telegram не вернул file_id для загруженного типа контента');
+    }
+
     const pathResponse = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${fileId}`);
     const pathData = await pathResponse.json();
     
     if (pathData.ok) {
       const filePath = pathData.result.file_path;
       
-      // 2. ИСПРАВЛЕНО: Ссылка теперь ведёт на твой сервер Render, скрывая токен бота!
+      // Ссылка ведет на твой сервер Render, скрывая токен бота
       const downloadUrl = `https://${req.get('host')}/file/${filePath}`;
       console.log(`🔗 Безопасная ссылка сгенерирована: ${downloadUrl}\n`);
       return res.json({ success: true, url: downloadUrl });
     }
 
-    throw new Error('Не удалось получить путь файла от Telegram');
+    throw new Error('Не удалось получить путь файла от Telegram через getFile');
   } catch (error) {
     console.error('💥 Критический сбой внутри /upload:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// 3. ДОБАВЛЕНО: Безопасный прокси-роут для отдачи изображений и файлов
+// Безопасный прокси-роут для отдачи изображений и файлов
 app.get('/file/*', async (req, res) => {
   try {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    const filePath = req.params[0]; // Получаем путь вроде 'documents/file_0.jpg'
+    const filePath = req.params[0]; 
     
     if (!TG_BOT_TOKEN) return res.status(500).send("Токен бота отсутствует");
 
@@ -112,7 +130,6 @@ app.get('/file/*', async (req, res) => {
     
     if (!response.ok) return res.status(response.status).send("Файл не найден в Telegram");
 
-    // Пересылаем правильный тип контента (image/png, image/jpeg и т.д.)
     const contentType = response.headers.get('content-type');
     if (contentType) res.setHeader('Content-Type', contentType);
 
