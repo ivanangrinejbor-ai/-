@@ -38,12 +38,10 @@ app.post('/upload', upload.any(), async (req, res) => {
 
   console.log("\n=== [RENDER] ПОЛУЧЕН ЗАПРОС НА ЗАГРУЗКУ ===");
   
-  // Берем первый попавшийся файл из запроса
   const file = req.files && req.files[0];
-  
   if (!file) {
     console.error("❌ Файл не найден в запросе!");
-    return res.status(400).json({ error: 'Файл не найден в запросе фронтенда' });
+    return res.status(400).json({ error: 'Файл не найден' });
   }
 
   console.log(`📂 Файл: "${file.originalname}" | Ключ: "${file.fieldname}" | Размер: ${(file.size / (1024 * 1024)).toFixed(2)} МБ`);
@@ -54,16 +52,144 @@ app.post('/upload', upload.any(), async (req, res) => {
   }
 
   try {
-    const form = new FormData();
-    form.append('chat_id', TG_CHAT_ID);
+    // Используем встроенный в Node.js FormData (не путаем со старой библиотекой)
+    const nodeFormData = new globalThis.FormData();
+    nodeFormData.append('chat_id', TG_CHAT_ID);
     
     const safeName = `${Date.now()}-${file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")}`;
     
-    // Всегда отправляем в Telegram как документ, чтобы не терять качество и расширения (.apk, .newtrobat)
-    form.append('document', file.buffer, { 
-      filename: safeName,
-      contentType: 'application/octet-stream' 
+    // Превращаем буфер в Blob, чтобы встроенный fetch понял его
+    const fileBlob = new Blob([file.buffer], { type: 'application/octet-stream' });
+    nodeFormData.append('document', fileBlob, safeName);
+
+    console.log("🚀 Отправка файла в Telegram API...");
+
+    // Отправляем без ручных заголовков headers - fetch сам всё настроит идеально!
+    const response = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument`, {
+      method: 'POST',
+      body: nodeFormData
     });
+
+    const resData = await response.json();
+
+    if (!response.ok || !resData.ok) {
+      console.error("❌ Telegram отклонил запрос:", JSON.stringify(resData));
+      return res.status(500).json({ error: resData.description || 'Telegram Reject' });
+    }
+
+    console.log("🎉 Telegram успешно принял файл!");
+
+    let fileId = null;
+    if (resData.result.document) {
+      fileId = resData.result.document.file_id;
+    } else if (resData.result.photo) {
+      const photos = resData.result.photo;
+      fileId = photos[photos.length - 1].file_id;
+    } else if (resData.result.audio) {
+      fileId = resData.result.audio.file_id;
+    }
+
+    if (!fileId) {
+      throw new Error('Telegram не вернул file_id');
+    }
+
+    const pathResponse = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${fileId}`);
+    const pathData = await pathResponse.json();
+    
+    if (pathData.ok) {
+      const filePath = pathData.result.file_path;
+      
+      // Самый надежный вариант прямой ссылки, которую ждет твой storage.js во фронтенде
+      const downloadUrl = `https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath}`;
+      console.log(`🔗 Ссылка сгенерирована: ${downloadUrl}\n`);
+      
+      return res.json({ success: true, url: downloadUrl });
+    }
+
+    throw new Error('Не удалось получить путь файла от Telegram через getFile');
+  } catch (error) {
+    console.error('💥 Критический сбой внутри /upload:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});app.post('/upload', upload.any(), async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  console.log("\n=== [RENDER] ПОЛУЧЕН ЗАПРОС НА ЗАГРУЗКУ ===");
+  
+  const file = req.files && req.files[0];
+  if (!file) {
+    console.error("❌ Файл не найден в запросе!");
+    return res.status(400).json({ error: 'Файл не найден' });
+  }
+
+  console.log(`📂 Файл: "${file.originalname}" | Ключ: "${file.fieldname}" | Размер: ${(file.size / (1024 * 1024)).toFixed(2)} МБ`);
+
+  if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
+    console.error("❌ Ошибка: Переменные окружения не заданы!");
+    return res.status(500).json({ error: 'Бэкенд не настроен в Переменных Окружения.' });
+  }
+
+  try {
+    // Используем встроенный в Node.js FormData (не путаем со старой библиотекой)
+    const nodeFormData = new globalThis.FormData();
+    nodeFormData.append('chat_id', TG_CHAT_ID);
+    
+    const safeName = `${Date.now()}-${file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")}`;
+    
+    // Превращаем буфер в Blob, чтобы встроенный fetch понял его
+    const fileBlob = new Blob([file.buffer], { type: 'application/octet-stream' });
+    nodeFormData.append('document', fileBlob, safeName);
+
+    console.log("🚀 Отправка файла в Telegram API...");
+
+    // Отправляем без ручных заголовков headers - fetch сам всё настроит идеально!
+    const response = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument`, {
+      method: 'POST',
+      body: nodeFormData
+    });
+
+    const resData = await response.json();
+
+    if (!response.ok || !resData.ok) {
+      console.error("❌ Telegram отклонил запрос:", JSON.stringify(resData));
+      return res.status(500).json({ error: resData.description || 'Telegram Reject' });
+    }
+
+    console.log("🎉 Telegram успешно принял файл!");
+
+    let fileId = null;
+    if (resData.result.document) {
+      fileId = resData.result.document.file_id;
+    } else if (resData.result.photo) {
+      const photos = resData.result.photo;
+      fileId = photos[photos.length - 1].file_id;
+    } else if (resData.result.audio) {
+      fileId = resData.result.audio.file_id;
+    }
+
+    if (!fileId) {
+      throw new Error('Telegram не вернул file_id');
+    }
+
+    const pathResponse = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${fileId}`);
+    const pathData = await pathResponse.json();
+    
+    if (pathData.ok) {
+      const filePath = pathData.result.file_path;
+      
+      // Самый надежный вариант прямой ссылки, которую ждет твой storage.js во фронтенде
+      const downloadUrl = `https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath}`;
+      console.log(`🔗 Ссылка сгенерирована: ${downloadUrl}\n`);
+      
+      return res.json({ success: true, url: downloadUrl });
+    }
+
+    throw new Error('Не удалось получить путь файла от Telegram через getFile');
+  } catch (error) {
+    console.error('💥 Критический сбой внутри /upload:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
 
     console.log("🚀 Отправка файла в Telegram API...");
 
