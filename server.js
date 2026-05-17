@@ -4,30 +4,41 @@ const cors = require('cors');
 const FormData = require('form-data');
 
 const app = express();
-// На Render порт выдается динамически через process.env.PORT
+// НА РЕНДЕРЕ ПОРТ ДОЛЖЕН БЫТЬ ДИНАМИЧЕСКИМ (по умолчанию Render дает 10000)
 const PORT = process.env.PORT || 10000; 
 
-// Жесткая и полная настройка CORS для любых доменов
+// ЖЕСТКАЯ НАСТРОЙКА CORS ДЛЯ ПРОБИТИЯ ЛЮБЫХ БЛОКИРОВОК БРАУЗЕРА
 app.use(cors({
-  origin: '*',
+  origin: '*', // Разрешаем запросы абсолютно отовсюду (включая netlify.app)
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  credentials: true
 }));
 
-app.options('*', cors());
+// ПРИНУДИТЕЛЬНЫЙ ОТВЕТ НА ПРОВЕРОЧНЫЕ ЗАПРОСЫ OPTIONS (Preflight)
+app.options('*', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.sendStatus(200);
+});
+
 app.use(express.json());
 
-// Настраиваем multer в память (Render Free дает 512 МБ RAM, 150 МБ под буфер - отлично)
+// Настраиваем multer в оперативную память
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 150 * 1024 * 1024 } 
+  limits: { fileSize: 150 * 1024 * 1024 } // Ограничение 150 МБ под APK
 });
 
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 app.post('/upload', upload.single('document'), async (req, res) => {
+  // Дополнительно вешаем заголовки прямо в ответ роута загрузки
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
   console.log("\n=== [RENDER] ПОЛУЧЕН ЗАПРОС НА ЗАГРУЗКУ ===");
   
   if (!req.file) {
@@ -38,7 +49,7 @@ app.post('/upload', upload.single('document'), async (req, res) => {
   console.log(`📂 Файл: "${req.file.originalname}" | Размер: ${(req.file.size / (1024 * 1024)).toFixed(2)} МБ`);
 
   if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
-    console.error("❌ Ошибка: Переменные окружения TG_BOT_TOKEN или TG_CHAT_ID не заданы в панели Render!");
+    console.error("❌ Ошибка: Переменные окружения TG_BOT_TOKEN или TG_CHAT_ID не заданы в Render!");
     return res.status(500).json({ error: 'Бэкенд не настроен в Переменных Окружения.' });
   }
 
@@ -48,19 +59,20 @@ app.post('/upload', upload.single('document'), async (req, res) => {
     
     const safeName = `${Date.now()}-${req.file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")}`;
     
-    // Маскируем APK под octet-stream, чтобы убрать лишние проверки типов
+    // Маскируем APK под octet-stream, чтобы убрать лишние придирки сетей к TLS
     form.append('document', req.file.buffer, { 
       filename: safeName,
       contentType: 'application/octet-stream' 
     });
 
-    console.log("🚀 Отправка fetch в Telegram API...");
+    console.log("🚀 Отправка нативного fetch в Telegram API...");
 
+    // Используем встроенный fetch Node 18, который обходит баги axios с сокетами
     const response = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument`, {
       method: 'POST',
       headers: form.getHeaders(),
       body: form,
-      signal: AbortSignal.timeout(300000) // 5 минут таймаут
+      signal: AbortSignal.timeout(300000) // 5 минут таймаут на загрузку
     });
 
     const resData = await response.json();
@@ -85,16 +97,18 @@ app.post('/upload', upload.single('document'), async (req, res) => {
 
     throw new Error('Не удалось получить путь файла от Telegram');
   } catch (error) {
-    console.error('💥 Критический сбой:', error.message);
+    console.error('💥 Критический сбой внутри /upload:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Роут проверки работоспособности сервера
+// Проверка доступности сервера прямо из браузера
 app.get('/', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.send('IvPlay Бэкенд на Render Работает Идеально!');
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 Сервер успешно запущен на порту ${PORT}`);
+});
 });
