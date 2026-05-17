@@ -1,121 +1,142 @@
-// ========================================================
-// URL ТВОЕГО БЭКЕНДА НА RENDER
-// ========================================================
-const BACKEND_URL = "https://1-b1n9.onrender.com";
+const express = require('express');
+const multer = require('multer');
+const cors = require('cors');
 
-const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const app = express();
+const PORT = process.env.PORT  10000; 
 
-/**
- * Вспомогательная функция для отправки ЛЮБОГО файла (хоть APK, хоть скриншот) на твой бэкенд
- */
-function sendFileToBackend(file) {
-  return new Promise((resolve, reject) => {
-    const formData = new FormData();
-    // Передаем файл. Наш сервер с upload.any() примет его с любым ключом
-    formData.append("document", file); 
+// НАСТРОЙКА CORS
+app.use(cors({
+  origin: '*', 
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  credentials: true
+}));
 
-    const xhr = new XMLHttpRequest();
-    
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const resData = JSON.parse(xhr.responseText);
-          if (resData.success && resData.url) {
-            resolve(resData.url); // Возвращает прокси-ссылку вида https://1-b1n9.onrender.com/file/...
-          } else {
-            reject(new Error(resData.error || "Бэкенд не вернул ссылку"));
-          }
-        } catch (e) {
-          reject(new Error("Ошибка парсинга ответа сервера"));
-        }
-      } else {
-        try {
-          const errData = JSON.parse(xhr.responseText);
-          reject(new Error(errData.error || `Ошибка сервера: ${xhr.status}`));
-        } catch(e) {
-          reject(new Error(`Бэкенд ответил ошибкой: ${xhr.status}`));
-        }
-      }
-    };
+app.options('*', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.sendStatus(200);
+});
 
-    xhr.onerror = () => reject(new Error("Сетевая ошибка при связи с сервером"));
-    
-    xhr.open("POST", `${BACKEND_URL}/upload`);
-    xhr.send(formData);
-  });
-}
+app.use(express.json());
 
-/**
- * Главная функция сборки и загрузки всех ресурсов проекта
- */
-export async function uploadProjectAssets({ projectId, apkFile, newtrobatFile, screenshots, onProgress }) {
-  const uploads = [];
-  const screenshotFiles = Array.from(screenshots || []).slice(0, 8);
+const storage = multer.memoryStorage();
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 150 * 1024 * 1024 } 
+});
 
-  // 1. Считаем общее количество файлов для прогресс-бара
-  let totalFiles = 0;
-  if (apkFile) totalFiles++;
-  if (newtrobatFile) totalFiles++;
-  totalFiles += screenshotFiles.length;
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
+const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
-  let completedFiles = 0;
+// ГЛАВНЫЙ РОУТ ЗАГРУЗКИ
+app.post('/upload', upload.any(), async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
 
-  // Функция для обновления прогресса на фронтенде
-  const tickProgress = (fileName) => {
-    completedFiles++;
-    const percent = Math.round((completedFiles / totalFiles) * 100);
-    onProgress?.(percent, fileName);
-  };
-
-  // 2. Загружаем APK (если есть)
-  let apkUrl = null;
-  if (apkFile) {
-    onProgress?.(Math.round((completedFiles / totalFiles) * 100), `Загрузка ${apkFile.name}...`);
-    apkUrl = await sendFileToBackend(apkFile);
-    tickProgress(apkFile.name);
+  console.log("\n=== [RENDER] ПОЛУЧЕН ЗАПРОС НА ЗАГРУЗКУ ===");
+  
+  const file = req.files && req.files[0];
+  if (!file) {
+    console.error("❌ Файл не найден в запросе!");
+    return res.status(400).json({ error: 'Файл не найден в запросе фронтенда' });
   }
 
-  // 3. Загружаем .newtrobat файл (если есть)
-  let newtrobatUrl = null;
-  if (newtrobatFile) {
-    onProgress?.(Math.round((completedFiles / totalFiles) * 100), `Загрузка ${newtrobatFile.name}...`);
-    newtrobatUrl = await sendFileToBackend(newtrobatFile);
-    tickProgress(newtrobatFile.name);
+  console.log(`📂 Файл: "${file.originalname}" | Ключ: "${file.fieldname}" | Размер: ${(file.size / (1024 * 1024)).toFixed(2)} МБ`);
+
+  if (!TG_BOT_TOKEN  !TG_CHAT_ID) {
+    console.error("❌ Ошибка: Переменные окружения не заданы!");
+    return res.status(500).json({ error: 'Бэкенд не настроен в Переменных Окружения.' });
   }
 
-  // 4. ИСПРАВЛЕНО: Загружаем скриншоты на твой бэкенд вместо Firebase!
-  const screenshotUrls = [];
-  for (const imgFile of screenshotFiles) {
-    if (!IMAGE_TYPES.includes(imgFile.type)) {
-      console.warn(`Пропущен неподдерживаемый файл: ${imgFile.name}`);
-      continue;
+  try {
+    // Используем встроенный в Node.js FormData, чтобы не конфликтовать со старыми библиотеками
+    const nodeFormData = new globalThis.FormData();
+    nodeFormData.append('chat_id', TG_CHAT_ID);
+    
+    const safeName = ${Date.now()}-${file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")};
+    
+    // Переводим буфер в Blob для отправки через fetch
+    const fileBlob = new Blob([file.buffer], { type: 'application/octet-stream' });
+    nodeFormData.append('document', fileBlob, safeName);
+
+    console.log("🚀 Отправка файла в Telegram API...");
+
+    // Чистый fetch без ручных headers — Node.js сам выставит нужные границы (boundary)
+    const response = await fetch(https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument, {
+      method: 'POST',
+      body: nodeFormData
+    });
+
+    const resData = await response.json();
+
+    if (!response.ok  !resData.ok) {
+      console.error("❌ Telegram отклонил запрос:", JSON.stringify(resData));
+      return res.status(500).json({ error: resData.description  'Telegram Reject' });
     }
-    onProgress?.(Math.round((completedFiles / totalFiles) * 100), `Загрузка скриншота ${imgFile.name}...`);
-    
-    // Шлём картинку на тот же роут /upload
-    const imgUrl = await sendFileToBackend(imgFile);
-    screenshotUrls.push(imgUrl);
-    
-    tickProgress(imgFile.name);
-  }
 
-  // Возвращаем объект со всеми ссылками обратно в app.js для сохранения в базу данных
-  return {
-    apkUrl,
-    newtrobatUrl,
-    screenshots: screenshotUrls
-  };
-}
+    console.log("🎉 Telegram успешно принял файл!");
 
-/**
- * Загрузка аватарки (Переводим тоже на бэкенд, чтобы полностью избавиться от Firebase Storage)
- */
-export async function uploadAvatarFile(file, onProgress) {
-  if (!IMAGE_TYPES.includes(file.type)) {
-    throw new Error("Допускаются только изображения PNG, JPG и WebP.");
+    let fileId = null;
+    if (resData.result.document) {
+      fileId = resData.result.document.file_id;
+    } else if (resData.result.photo) {
+      const photos = resData.result.photo;
+      fileId = photos[photos.length - 1].file_id;
+    } else if (resData.result.audio) {
+      fileId = resData.result.audio.file_id;
+    }
+
+    if (!fileId) {
+      throw new Error('Telegram не вернул file_id для загруженного типа контента');
+    }
+
+    const pathResponse = await fetch(https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${fileId});
+    const pathData = await pathResponse.json();
+    
+    if (pathData.ok) {
+      const filePath = pathData.result.file_path;
+      
+      // Генерируем безопасную прокси-ссылку
+      const downloadUrl = https://${req.get('host')}/file/${filePath};
+      console.log(🔗 Безопасная ссылка сгенерирована: ${downloadUrl}\n);
+      return res.json({ success: true, url: downloadUrl });
+    }
+
+    throw new Error('Не удалось получить путь файла от Telegram через getFile');
+  } catch (error) {
+    console.error('💥 Критический сбой внутри /upload:', error.message);
+    return res.status(500).json({ error: error.message });
   }
-  onProgress?.(10, "Загрузка аватарки...");
-  const url = await sendFileToBackend(file);
-  onProgress?.(100, "Готово");
-  return { url };
-}
+});
+// БЕЗОПАСНЫЙ ПРОКСИ-РОУТ ДЛЯ СКАЧИВАНИЯ ФАЙЛОВ
+app.get('/file/*', async (req, res) => {
+  try {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const filePath = req.params[0]; 
+    
+    if (!TG_BOT_TOKEN) return res.status(500).send("Токен бота отсутствует");
+
+    const response = await fetch(https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath});
+    
+    if (!response.ok) return res.status(response.status).send("Файл не найден в Telegram");
+
+    const contentType = response.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+
+    const arrayBuffer = await response.arrayBuffer();
+    res.send(Buffer.from(arrayBuffer));
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.get('/', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.send('IvPlay Бэкенд на Render Работает Идеально!');
+});
+
+app.listen(PORT, () => {
+  console.log(🚀 Сервер успешно запущен на порту ${PORT});
+});
