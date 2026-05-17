@@ -1,14 +1,14 @@
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
+const FormData = require('form-data');
 
 const app = express();
-// Порт для Render
 const PORT = process.env.PORT || 10000; 
 
-// Полное пробитие CORS
+// НАСТРОЙКА CORS
 app.use(cors({
-  origin: '*',
+  origin: '*', 
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true
@@ -23,7 +23,6 @@ app.options('*', (req, res) => {
 
 app.use(express.json());
 
-// Настройка multer в оперативную память (до 150 МБ под APK)
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
@@ -33,7 +32,8 @@ const upload = multer({
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
-app.post('/upload', upload.single('document'), async (req, res) => {
+// 1. ИСПРАВЛЕНО: Теперь Multer слушает поле 'file', как присылает фронтенд
+app.post('/upload', upload.single('file'), async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   console.log("\n=== [RENDER] ПОЛУЧЕН ЗАПРОС НА ЗАГРУЗКУ ===");
@@ -46,29 +46,29 @@ app.post('/upload', upload.single('document'), async (req, res) => {
   console.log(`📂 Файл: "${req.file.originalname}" | Размер: ${(req.file.size / (1024 * 1024)).toFixed(2)} МБ`);
 
   if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
-    console.error("❌ Ошибка: Переменные окружения TG_BOT_TOKEN или TG_CHAT_ID пустые в панели Render!");
-    return res.status(500).json({ error: 'Бэкенд не настроен в Переменных Окружения Render.' });
+    console.error("❌ Ошибка: Переменные окружения не заданы!");
+    return res.status(500).json({ error: 'Бэкенд не настроен в Переменных Окружения.' });
   }
 
   try {
-    console.log("📦 Сборка нативного FormData под Node.js v24...");
+    const form = new FormData();
+    form.append('chat_id', TG_CHAT_ID);
     
-    // Переводим буфер multer в нативный Blob, понятный встроенному fetch
-    const fileBlob = new Blob([req.file.buffer], { type: 'application/octet-stream' });
     const safeName = `${Date.now()}-${req.file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")}`;
+    
+    // Для Телеграма оставляем ключ 'document'
+    form.append('document', req.file.buffer, { 
+      filename: safeName,
+      contentType: 'application/octet-stream' 
+    });
 
-    // Используем встроенный FormData вместо старого require('form-data')
-    const nativeForm = new globalThis.FormData();
-    nativeForm.append('chat_id', TG_CHAT_ID);
-    nativeForm.append('document', fileBlob, safeName);
+    console.log("🚀 Отправка файла в Telegram API...");
 
-    console.log("🚀 Отправка нативного fetch в Telegram API...");
-
-    // Нативный fetch сам выставит правильные multipart заголовки и boundary
     const response = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument`, {
       method: 'POST',
-      body: nativeForm,
-      signal: AbortSignal.timeout(300000) // 5 минут таймаут на загрузку тяжелых APK
+      headers: form.getHeaders(),
+      body: form,
+      signal: AbortSignal.timeout(300000)
     });
 
     const resData = await response.json();
@@ -81,22 +81,45 @@ app.post('/upload', upload.single('document'), async (req, res) => {
     console.log("🎉 Telegram успешно принял файл!");
 
     const fileId = resData.result.document.file_id;
-    console.log(`🆔 Получен File ID: ${fileId}. Запрашиваем прямой путь к файлу...`);
-
     const pathResponse = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${fileId}`);
     const pathData = await pathResponse.json();
     
     if (pathData.ok) {
       const filePath = pathData.result.file_path;
-      const downloadUrl = `https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath}`;
-      console.log(`🔗 Ссылка сгенерирована: ${downloadUrl}\n`);
+      
+      // 2. ИСПРАВЛЕНО: Ссылка теперь ведёт на твой сервер Render, скрывая токен бота!
+      const downloadUrl = `https://${req.get('host')}/file/${filePath}`;
+      console.log(`🔗 Безопасная ссылка сгенерирована: ${downloadUrl}\n`);
       return res.json({ success: true, url: downloadUrl });
     }
 
-    throw new Error('Не удалось получить путь файла от Telegram через getFile');
+    throw new Error('Не удалось получить путь файла от Telegram');
   } catch (error) {
     console.error('💥 Критический сбой внутри /upload:', error.message);
-    return res.status(500).json({ error: error.message });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 3. ДОБАВЛЕНО: Безопасный прокси-роут для отдачи изображений и файлов
+app.get('/file/*', async (req, res) => {
+  try {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const filePath = req.params[0]; // Получаем путь вроде 'documents/file_0.jpg'
+    
+    if (!TG_BOT_TOKEN) return res.status(500).send("Токен бота отсутствует");
+
+    const response = await fetch(`https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath}`);
+    
+    if (!response.ok) return res.status(response.status).send("Файл не найден в Telegram");
+
+    // Пересылаем правильный тип контента (image/png, image/jpeg и т.д.)
+    const contentType = response.headers.get('content-type');
+    if (contentType) res.setHeader('Content-Type', contentType);
+
+    const arrayBuffer = await response.arrayBuffer();
+    res.send(Buffer.from(arrayBuffer));
+  } catch (error) {
+    res.status(500).send(error.message);
   }
 });
 
