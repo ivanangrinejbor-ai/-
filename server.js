@@ -4,18 +4,18 @@ const cors = require('cors');
 const FormData = require('form-data');
 
 const app = express();
-// НА РЕНДЕРЕ ПОРТ ДОЛЖЕН БЫТЬ ДИНАМИЧЕСКИМ (по умолчанию Render дает 10000)
+// Render динамически даёт порт. Если его нет, берём 10000
 const PORT = process.env.PORT || 10000; 
 
-// ЖЕСТКАЯ НАСТРОЙКА CORS ДЛЯ ПРОБИТИЯ ЛЮБЫХ БЛОКИРОВОК БРАУЗЕРА
+// Полное пробитие CORS
 app.use(cors({
-  origin: '*', // Разрешаем запросы абсолютно отовсюду (включая netlify.app)
+  origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true
 }));
 
-// ПРИНУДИТЕЛЬНЫЙ ОТВЕТ НА ПРОВЕРОЧНЫЕ ЗАПРОСЫ OPTIONS (Preflight)
+// Принудительный ответ на OPTIONS запросы браузера
 app.options('*', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -25,18 +25,16 @@ app.options('*', (req, res) => {
 
 app.use(express.json());
 
-// Настраиваем multer в оперативную память
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 150 * 1024 * 1024 } // Ограничение 150 МБ под APK
+  limits: { fileSize: 150 * 1024 * 1024 } 
 });
 
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 app.post('/upload', upload.single('document'), async (req, res) => {
-  // Дополнительно вешаем заголовки прямо в ответ роута загрузки
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   console.log("\n=== [RENDER] ПОЛУЧЕН ЗАПРОС НА ЗАГРУЗКУ ===");
@@ -49,7 +47,7 @@ app.post('/upload', upload.single('document'), async (req, res) => {
   console.log(`📂 Файл: "${req.file.originalname}" | Размер: ${(req.file.size / (1024 * 1024)).toFixed(2)} МБ`);
 
   if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
-    console.error("❌ Ошибка: Переменные окружения TG_BOT_TOKEN или TG_CHAT_ID не заданы в Render!");
+    console.error("❌ Ошибка: Переменные окружения бота пусты!");
     return res.status(500).json({ error: 'Бэкенд не настроен в Переменных Окружения.' });
   }
 
@@ -59,20 +57,18 @@ app.post('/upload', upload.single('document'), async (req, res) => {
     
     const safeName = `${Date.now()}-${req.file.originalname.trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9.\-_]/g, "")}`;
     
-    // Маскируем APK под octet-stream, чтобы убрать лишние придирки сетей к TLS
     form.append('document', req.file.buffer, { 
       filename: safeName,
       contentType: 'application/octet-stream' 
     });
 
-    console.log("🚀 Отправка нативного fetch в Telegram API...");
+    console.log("🚀 Отправка fetch в Telegram API...");
 
-    // Используем встроенный fetch Node 18, который обходит баги axios с сокетами
     const response = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument`, {
       method: 'POST',
       headers: form.getHeaders(),
       body: form,
-      signal: AbortSignal.timeout(300000) // 5 минут таймаут на загрузку
+      signal: AbortSignal.timeout(300000)
     });
 
     const resData = await response.json();
@@ -102,7 +98,6 @@ app.post('/upload', upload.single('document'), async (req, res) => {
   }
 });
 
-// Проверка доступности сервера прямо из браузера
 app.get('/', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.send('IvPlay Бэкенд на Render Работает Идеально!');
@@ -110,5 +105,4 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Сервер успешно запущен на порту ${PORT}`);
-});
 });
