@@ -9,7 +9,14 @@ const app = express();
 const PORT = process.env.PORT || 7860; 
 
 // Включаем CORS, чтобы твой сайт мог без проблем слать запросы
-app.use(cors({ origin: '*' }));
+app.use(cors({
+origin: '*',
+methods: ['GET', 'POST', 'OPTIONS'],
+allowedHeaders: ['Content-Type']
+}));
+
+app.options('*', cors());
+
 app.use(express.json());
 
 // Настраиваем multer для сборки файлов в оперативной памяти (до 250 МБ)
